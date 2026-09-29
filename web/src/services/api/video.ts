@@ -2,6 +2,7 @@ import axios from "axios";
 
 import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
 import { isMiniMaxH3Config, normalizeMiniMaxH3Duration, normalizeMiniMaxH3Ratio, normalizeMiniMaxH3Resolution } from "@/lib/minimax-video";
+import { modelChannelAttributionHeaders } from "@/lib/model-channel";
 import { dataUrlToGeminiInlineData, geminiActionUrl, geminiDirectHeaders, geminiErrorMessage, geminiOperationUrl, isGeminiConfig, isGeminiVideoModel } from "@/lib/gemini";
 import { isGeminiVeo31Model, normalizeGeminiVideoDuration, normalizeGeminiVideoRatio, normalizeGeminiVideoResolution } from "@/lib/gemini-video";
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio } from "@/lib/seedance-video";
@@ -84,7 +85,10 @@ function aiHeaders(config: AiConfig) {
     if (config.channelMode === "remote") return { Authorization: `Bearer ${token}`, ...(channelIdForActiveModel(config) ? { "X-Model-Channel-ID": channelIdForActiveModel(config) } : {}) };
     if (token) return { Authorization: `Bearer ${token}`, ...(channelIdForActiveModel(config) ? { "X-User-Model-Channel-ID": channelIdForActiveModel(config) } : {}) };
     if (isGeminiConfig(config)) return geminiDirectHeaders(config);
-    return { Authorization: `Bearer ${localChannelForActiveModel(config)?.apiKey || config.apiKey}` };
+    return {
+        Authorization: `Bearer ${localChannelForActiveModel(config)?.apiKey || config.apiKey}`,
+        ...modelChannelAttributionHeaders(channelProtocolForConfig(config)),
+    };
 }
 
 function refreshRemoteUser(config: AiConfig) {
@@ -326,15 +330,41 @@ async function createVideoRequestBody(config: AiConfig, model: string, prompt: s
         if (!capabilities) throw new VideoRequestError("当前 AutoDL 工作流尚未适配");
         const { autoDLReferenceURL } = await import("./direct-ai");
         const [images, videos, audios, firstFrame, lastFrame] = await Promise.all([
-            Promise.all((capabilities.imageMax ? input.references : []).map(autoDLReferenceURL)),
-            Promise.all((capabilities.videoMax ? input.videoReferences : []).map(autoDLReferenceURL)),
-            Promise.all((capabilities.audioMax ? input.audioReferences : []).map(autoDLReferenceURL)),
+            Promise.all((capabilities.imageMax ? input.references : []).map((reference) => autoDLReferenceURL(reference))),
+            Promise.all((capabilities.videoMax ? input.videoReferences : []).map((reference) => autoDLReferenceURL(reference))),
+            Promise.all((capabilities.audioMax ? input.audioReferences : []).map((reference) => autoDLReferenceURL(reference))),
             capabilities.firstFrame && input.firstFrame ? autoDLReferenceURL(input.firstFrame) : Promise.resolve(""),
             capabilities.lastFrame && input.lastFrame ? autoDLReferenceURL(input.lastFrame) : Promise.resolve(""),
         ]);
         return {
             model, prompt, seconds: config.videoSeconds, size: config.size, resolution_name: config.vquality,
             "input_reference[]": images, "video_reference[]": videos, "audio_reference[]": audios,
+            ...(firstFrame ? { first_frame_url: firstFrame } : {}),
+            ...(lastFrame ? { last_frame_url: lastFrame } : {}),
+        };
+    }
+    if (videoChannelProtocol(config, model) === "tokendance") {
+        const { autoDLReferenceURL } = await import("./direct-ai");
+        const referenceURL = (reference: ReferenceImage | ReferenceVideo | ReferenceAudio) => autoDLReferenceURL(reference, "TokenDance");
+        const [images, videos, audios, firstFrame, lastFrame] = await Promise.all([
+            Promise.all(input.references.map(referenceURL)),
+            Promise.all(input.videoReferences.map(referenceURL)),
+            Promise.all(input.audioReferences.map(referenceURL)),
+            input.firstFrame ? referenceURL(input.firstFrame) : Promise.resolve(""),
+            input.lastFrame ? referenceURL(input.lastFrame) : Promise.resolve(""),
+        ]);
+        return {
+            model,
+            prompt,
+            seconds: normalizeVideoSecondsForModel(model, config.videoSeconds),
+            size: normalizeSeedanceRatio(config.size),
+            resolution_name: normalizeVideoResolution(config.vquality),
+            video_generate_audio: boolConfig(config.videoGenerateAudio, false),
+            video_watermark: boolConfig(config.videoWatermark, false),
+            character_orientation: normalizeCharacterOrientation(config.videoCharacterOrientation),
+            ...(images.length ? { "input_reference[]": images } : {}),
+            ...(videos.length ? { "video_reference[]": videos } : {}),
+            ...(audios.length ? { "audio_reference[]": audios } : {}),
             ...(firstFrame ? { first_frame_url: firstFrame } : {}),
             ...(lastFrame ? { last_frame_url: lastFrame } : {}),
         };
